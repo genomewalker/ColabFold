@@ -159,6 +159,8 @@ def load_models_and_params(
                 model_config.model.recycle_early_stop_tolerance = recycle_early_stop_tolerance
             
             # get model runner
+            # PATCH(throughput): load params once; reuse below to avoid
+            # a second ~400MB np.load of the same file on shared storage.
             params = get_model_haiku_params(
                 model_type=model_type,
                 model_number=model_number,
@@ -172,13 +174,17 @@ def load_models_and_params(
                 extended_ptm_config={'calc_extended_ptm': calc_extra_ptm,
                                      'use_probs_extended': use_probs_extra}
             )
-        
-        params = get_model_haiku_params(
-            model_type=model_type,
-            model_number=model_number,
-            data_dir=str(data_dir),
-            use_fuse=use_fuse,
-        )
+
+        # PATCH(throughput): compiled model already has params in scope above;
+        # only load from disk for non-compiled models (avoids a second ~400MB
+        # np.load of the same file on shared storage for the compiled model).
+        if model_number not in models_need_compilation:
+            params = get_model_haiku_params(
+                model_type=model_type,
+                model_number=model_number,
+                data_dir=str(data_dir),
+                use_fuse=use_fuse,
+            )
         # keep only parameters of compiled model
         params_subset = {}
         for k in model_runner.params.keys():

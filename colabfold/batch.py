@@ -558,12 +558,15 @@ def predict_structure(
                 np.save(files.get("pair_repr","npy"),result["representations"]["pair"])
 
             # write an easy-to-use format (pAE and pLDDT)
+            # PATCH(throughput): keep plddt/pae as float32 numpy arrays; orjson
+            # serialises them directly via OPT_SERIALIZE_NUMPY, avoiding the
+            # O(N²) .tolist() + Python-float materialisation on the main thread.
             plddt = result["plddt"][:seq_len]
-            scores = {"plddt": np.around(plddt.astype(float), 2).tolist()}
+            scores = {"plddt": np.around(plddt.astype(np.float32), 2)}
             if "predicted_aligned_error" in result:
                 pae = result["predicted_aligned_error"][:seq_len,:seq_len]
-                scores.update({"max_pae": pae.max().astype(float).item(),
-                                "pae": np.around(pae.astype(float), 2).tolist()})
+                scores.update({"max_pae": float(pae.max()),
+                                "pae": np.around(pae.astype(np.float32), 2)})
                 if calc_extra_ptm:
                     scores.update(extra_ptm_output)
                 for k in ["ptm", "iptm"]:
@@ -573,9 +576,12 @@ def predict_structure(
             del plddt
             file = files.get("scores", "json")
             if hasOrjson:
-                file.write_bytes(orjson.dumps(scores))
+                file.write_bytes(orjson.dumps(scores, option=orjson.OPT_SERIALIZE_NUMPY))
             else:
-                file.write_text(json.dumps(scores))
+                # fallback: materialise tolist() only when orjson unavailable
+                scores_serial = {k: v.tolist() if isinstance(v, np.ndarray) else v
+                                 for k, v in scores.items()}
+                file.write_text(json.dumps(scores_serial))
 
             del result, unrelaxed_protein
 
@@ -2092,13 +2098,13 @@ def main():
     )
     adv_group.add_argument(
         "--recompile-padding",
-        type=int,
-        default=10,
+        type=float,
+        default=1.1,
         help="Whenever the input length changes, the model needs to be recompiled. "
-        "We pad sequences by the specified length, so we can e.g., compute sequences from length 100 to 110 without recompiling. "
-        "Individual predictions will become marginally slower due to longer input, "
-        "but overall performance increases due to not recompiling. "
-        "Set to 0 to disable.",
+        "Float >=1.0: multiplicative factor (e.g. 1.1 pads to ceil(L*1.1)), giving O(log N) "
+        "recompiles over a length-sorted batch. "
+        "Integer >=0: absolute residue padding (legacy behaviour, e.g. 10). "
+        "Set to 1.0 or 0 to disable padding.",
     )
     adv_group.add_argument(
         "--debug-logging",
