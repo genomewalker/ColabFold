@@ -24,6 +24,7 @@ import zipfile
 import shutil
 import pickle
 import gzip
+from concurrent.futures import ThreadPoolExecutor, wait as _futures_wait
 
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 from pathlib import Path
@@ -87,6 +88,10 @@ from Bio.PDB.PDBIO import Select
 # logging settings
 logger = logging.getLogger(__name__)
 from jax import local_devices
+
+def _pickle_write(path: Path, obj: Any) -> None:
+    with path.open("wb") as fh:
+        pickle.dump(obj, fh)
 
 # from jax 0.4.6, jax._src.lib.xla_bridge moved to jax._src.xla_bridge
 # suppress warnings: Unable to initialize backend 'rocm' or 'tpu'
@@ -415,6 +420,9 @@ def predict_structure(
     model_names = []
     files = file_manager(prefix, result_dir)
     seq_len = sum(sequences_lengths)
+    # PATCH(throughput): async writer pool — decouple NFS writes from GPU loop
+    _writer = ThreadPoolExecutor(max_workers=3)
+    _write_futures = []
 
     # iterate through random seeds
     for seed_num, seed in enumerate(range(random_seed, random_seed+num_seeds)):
@@ -543,24 +551,26 @@ def predict_structure(
             # save results
             #########################
 
-            # save pdb
+            # save pdb — async: NFS write must not block GPU dispatch
             protein_lines = protein.to_pdb(unrelaxed_protein)
-            files.get("unrelaxed","pdb").write_text(protein_lines)
+            _write_futures.append(_writer.submit(
+                files.get("unrelaxed","pdb").write_text, protein_lines))
             unrelaxed_pdb_lines.append(protein_lines)
 
             # save raw outputs
             if save_all:
-                with files.get("all","pickle").open("wb") as handle:
-                    pickle.dump(result, handle)
+                _write_futures.append(_writer.submit(
+                    _pickle_write, files.get("all","pickle"), result))
             if save_single_representations:
-                np.save(files.get("single_repr","npy"),result["representations"]["single"])
+                _repr = result["representations"]["single"].copy()
+                _write_futures.append(_writer.submit(
+                    np.save, files.get("single_repr","npy"), _repr))
             if save_pair_representations:
-                np.save(files.get("pair_repr","npy"),result["representations"]["pair"])
+                _repr = result["representations"]["pair"].copy()
+                _write_futures.append(_writer.submit(
+                    np.save, files.get("pair_repr","npy"), _repr))
 
-            # write an easy-to-use format (pAE and pLDDT)
-            # PATCH(throughput): keep plddt/pae as float32 numpy arrays; orjson
-            # serialises them directly via OPT_SERIALIZE_NUMPY, avoiding the
-            # O(N²) .tolist() + Python-float materialisation on the main thread.
+            # scores (pAE and pLDDT) — serialise on main thread, write async
             plddt = result["plddt"][:seq_len]
             scores = {"plddt": np.around(plddt.astype(np.float32), 2)}
             if "predicted_aligned_error" in result:
@@ -574,14 +584,16 @@ def predict_structure(
                         scores[k] = np.around(conf[-1][k], 2).item()
                 del pae
             del plddt
-            file = files.get("scores", "json")
+            _score_file = files.get("scores", "json")
             if hasOrjson:
-                file.write_bytes(orjson.dumps(scores, option=orjson.OPT_SERIALIZE_NUMPY))
+                _score_bytes = orjson.dumps(scores, option=orjson.OPT_SERIALIZE_NUMPY)
+                _write_futures.append(_writer.submit(
+                    _score_file.write_bytes, _score_bytes))
             else:
-                # fallback: materialise tolist() only when orjson unavailable
                 scores_serial = {k: v.tolist() if isinstance(v, np.ndarray) else v
                                  for k, v in scores.items()}
-                file.write_text(json.dumps(scores_serial))
+                _write_futures.append(_writer.submit(
+                    _score_file.write_text, json.dumps(scores_serial)))
 
             del result, unrelaxed_protein
 
@@ -594,6 +606,10 @@ def predict_structure(
         # cleanup
         if "multimer" not in model_type: del input_features
     if "multimer" in model_type: del input_features
+
+    # drain writer pool before renaming files
+    _futures_wait(_write_futures)
+    _writer.shutdown(wait=False)
 
     ###################################################
     # rerank models based on predicted confidence
@@ -1558,7 +1574,8 @@ def run(
                         use_fuse=use_fuse,
                         use_bfloat16=use_bfloat16,
                         save_all=save_all,
-                        calc_extra_ptm=calc_extra_ptm
+                        calc_extra_ptm=calc_extra_ptm,
+                        num_gpus=kwargs.get('num_gpus', 1),
                     )
                     first_job = False
 
@@ -2007,6 +2024,14 @@ def main():
         "Unsupported on AMD/ROCM and Apple Silicon.",
     )
 
+    relax_group.add_argument(
+        "--num-gpus",
+        type=int,
+        default=1,
+        help="Number of GPUs to use for a single prediction via JAX GSPMD tensor sharding. "
+             "Use 2 to distribute the pair representation (N_res x N_res) across two 40-GB GPUs "
+             "when folding sequences longer than ~3500 aa.",
+    )
     output_group = parser.add_argument_group("Output arguments", "")
     output_group.add_argument(
         "--rank",
@@ -2248,6 +2273,7 @@ def main():
         local_pdb_path=args.local_pdb_path,
         use_cluster_profile=not args.disable_cluster_profile,
         use_gpu_relax = args.use_gpu_relax,
+        num_gpus = args.num_gpus,
         jobname_prefix=args.jobname_prefix,
         save_all=args.save_all,
         save_recycles=args.save_recycles,

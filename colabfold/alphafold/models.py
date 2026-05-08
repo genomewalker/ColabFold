@@ -77,7 +77,8 @@ def load_models_and_params(
     use_dropout: bool = False,
     save_all: bool = False,
     calc_extra_ptm: bool = False,
-    use_probs_extra: bool = True
+    use_probs_extra: bool = True,
+    num_gpus: int = 1,
 ) -> List[Tuple[str, model.RunModel, haiku.Params]]:
     """We use only two actual models and swap the parameters to avoid recompiling.
 
@@ -172,7 +173,8 @@ def load_models_and_params(
                 model_config,
                 params,
                 extended_ptm_config={'calc_extended_ptm': calc_extra_ptm,
-                                     'use_probs_extended': use_probs_extra}
+                                     'use_probs_extended': use_probs_extra},
+                num_gpus=num_gpus,
             )
 
         # PATCH(throughput): compiled model already has params in scope above;
