@@ -1,5 +1,5 @@
 --- /projects/caeg/scratch/kbd606/tmp/af_orig/extracted/alphafold/model/modules.py	2026-03-16 14:16:18.000000000 +0100
-+++ /projects/caeg/people/kbd606/opt/colabfold-env/lib/python3.10/site-packages/alphafold/model/modules.py	2026-05-10 06:48:57.012070000 +0200
++++ /projects/caeg/people/kbd606/opt/colabfold-env/lib/python3.10/site-packages/alphafold/model/modules.py	2026-05-10 08:36:40.482709000 +0200
 @@ -31,6 +31,21 @@
  import jax
  import jax.numpy as jnp
@@ -31,16 +31,17 @@
        extra_msa_stack_input = {
            'msa': extra_msa_activations,
            'pair': pair_activations,
-@@ -1990,7 +2007,7 @@
+@@ -1990,7 +2007,8 @@
        extra_msa_output, safe_key = extra_msa_stack(
            (extra_msa_stack_input, safe_key))
  
 -      pair_activations = extra_msa_output['pair']
 +      pair_activations = _maybe_shard_pair(extra_msa_output['pair'])
++      msa_activations = _maybe_shard_msa(msa_activations)
  
        evoformer_input = {
            'msa': msa_activations,
-@@ -2060,6 +2077,8 @@
+@@ -2060,6 +2078,8 @@
              masks=evoformer_masks,
              is_training=is_training,
              safe_key=safe_subkey)
