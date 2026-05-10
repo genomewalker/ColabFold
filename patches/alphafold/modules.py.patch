@@ -1,0 +1,51 @@
+--- /projects/caeg/scratch/kbd606/tmp/af_orig/extracted/alphafold/model/modules.py	2026-03-16 14:16:18.000000000 +0100
++++ /projects/caeg/people/kbd606/opt/colabfold-env/lib/python3.10/site-packages/alphafold/model/modules.py	2026-05-10 06:48:57.012070000 +0200
+@@ -31,6 +31,21 @@
+ import jax
+ import jax.numpy as jnp
+ 
++# Multi-GPU GSPMD sharding support.
++# Set by RunModel.__init__ when num_gpus > 1; None disables sharding.
++_PAIR_SHARDING = None  # NamedSharding for (N_res, N_res, c_z)
++_MSA_SHARDING  = None  # NamedSharding for (N_seq, N_res, c_m)
++
++def _maybe_shard_pair(x):
++    if _PAIR_SHARDING is None:
++        return x
++    return jax.lax.with_sharding_constraint(x, _PAIR_SHARDING)
++
++def _maybe_shard_msa(x):
++    if _MSA_SHARDING is None:
++        return x
++    return jax.lax.with_sharding_constraint(x, _MSA_SHARDING)
++
+ def softmax_cross_entropy(logits, labels):
+   """Computes softmax cross entropy given logits and one-hot class labels."""
+   loss = -jnp.sum(labels * jax.nn.log_softmax(logits), axis=-1)
+@@ -1960,6 +1975,8 @@
+ 
+       # Extra MSA Stack.
+       # Jumper et al. (2021) Suppl. Alg. 18 "ExtraMsaStack"
++      pair_activations = _maybe_shard_pair(pair_activations)
++      extra_msa_activations = _maybe_shard_msa(extra_msa_activations)
+       extra_msa_stack_input = {
+           'msa': extra_msa_activations,
+           'pair': pair_activations,
+@@ -1990,7 +2007,7 @@
+       extra_msa_output, safe_key = extra_msa_stack(
+           (extra_msa_stack_input, safe_key))
+ 
+-      pair_activations = extra_msa_output['pair']
++      pair_activations = _maybe_shard_pair(extra_msa_output['pair'])
+ 
+       evoformer_input = {
+           'msa': msa_activations,
+@@ -2060,6 +2077,8 @@
+             masks=evoformer_masks,
+             is_training=is_training,
+             safe_key=safe_subkey)
++        evoformer_output = dict(evoformer_output)
++        # sharding propagates automatically via lax.scan — no per-iter constraint needed
+         return (evoformer_output, safe_key)
+ 
+       if gc.use_remat:

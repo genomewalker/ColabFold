@@ -1,0 +1,54 @@
+--- /projects/caeg/scratch/kbd606/tmp/af_orig/extracted/alphafold/model/model.py	2026-03-16 14:16:18.000000000 +0100
++++ /projects/caeg/people/kbd606/opt/colabfold-env/lib/python3.10/site-packages/alphafold/model/model.py	2026-05-10 06:48:53.467349000 +0200
+@@ -24,6 +24,8 @@
+ import haiku as hk
+ import jax
+ import jax.numpy as jnp
++import jax.experimental.mesh_utils as mesh_utils
++from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+ import ml_collections
+ import numpy as np
+ import tensorflow.compat.v1 as tf
+@@ -35,7 +37,7 @@
+   def __init__(self,
+                config: ml_collections.ConfigDict,
+                params: Optional[Mapping[str, Mapping[str, np.ndarray]]] = None,
+-               is_training = False, extended_ptm_config=None):
++               is_training = False, extended_ptm_config=None, num_gpus: int = 1):
+     
+     self.config = config
+     self.params = params
+@@ -60,8 +62,18 @@
+               compute_loss=False,
+               ensemble_representations=True)
+ 
+-    self.apply = jax.jit(hk.transform(_forward_fn).apply)
+-    self.init = jax.jit(hk.transform(_forward_fn).init)
++    if num_gpus > 1:
++      devices = mesh_utils.create_device_mesh((num_gpus,))
++      self._mesh = Mesh(devices, ('seq',))
++      modules._PAIR_SHARDING = NamedSharding(self._mesh, P(None, None, 'seq'))
++      modules._MSA_SHARDING  = NamedSharding(self._mesh, P(None, 'seq', None))
++      with self._mesh:
++        self.apply = jax.jit(hk.transform(_forward_fn).apply)
++        self.init  = jax.jit(hk.transform(_forward_fn).init)
++    else:
++      self._mesh = None
++      self.apply = jax.jit(hk.transform(_forward_fn).apply)
++      self.init  = jax.jit(hk.transform(_forward_fn).init)
+ 
+   def init_params(self, feat: features.FeatureDict, random_seed: int = 0):
+     """Initializes the model parameters.
+@@ -169,7 +181,11 @@
+           else:
+             x[k] = np.asarray(v,np.float16)
+         return x
+-      result = _jnp_to_np(self.apply(self.params, key, {**feat, "prev":prev}))
++      if self._mesh is not None:
++        with self._mesh:
++          result = _jnp_to_np(self.apply(self.params, key, {**feat, "prev":prev}))
++      else:
++        result = _jnp_to_np(self.apply(self.params, key, {**feat, "prev":prev}))
+       prev = result.pop("prev")
+       return result, prev
+ 
